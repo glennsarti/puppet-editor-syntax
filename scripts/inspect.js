@@ -1,66 +1,57 @@
-// Adapted from https://github.com/Microsoft/vscode-textmate/blob/master/scripts/inspect.js
-
-if (process.argv.length < 4) {
-  console.log('usage: node index.js <mainGrammarPath> [<additionalGrammarPath1> ...] <filePath>');
+if (process.argv.length != 4) {
+  console.log('usage: node index.js <mainGrammarPath> <filePath>');
   process.exit(0);
 }
 
-var GRAMMAR_PATHS = process.argv.slice(2, process.argv.length - 1);
+var GRAMMAR_PATH = process.argv[process.argv.length - 2];
 var FILE_PATH = process.argv[process.argv.length - 1];
 
-process.env['VSCODE_TEXTMATE_DEBUG'] = true;
+const fs = require('fs');
+const vsctm = require('vscode-textmate');
+const oniguruma = require('oniguruma');
 
-var Registry = require('vscode-textmate').Registry;
-var registry = new Registry();
-
-console.log('LOADING GRAMMAR: ' + GRAMMAR_PATHS[0]);
-var grammar = registry.loadGrammarFromPathSync(GRAMMAR_PATHS[0]);
-for (var i = 1; i < GRAMMAR_PATHS.length; i++) {
-  console.log('LOADING GRAMMAR: ' + GRAMMAR_PATHS[i]);
-  registry.loadGrammarFromPathSync(GRAMMAR_PATHS[i]);
+/**
+ * Utility to read a file as a promise
+ */
+function readFile(path) {
+  return new Promise((resolve, reject) => {
+    fs.readFile(path, (error, data) => error ? reject(error) : resolve(data));
+  })
 }
 
-var fileContents = require('fs').readFileSync(FILE_PATH).toString();
-lines = fileContents.split(/\r\n|\r|\n/);
-
-var ruleStack = null;
-var lastElementId = 0;
-for (var i = 0; i < lines.length; i++) {
-  var line = lines[i];
-
-  console.log('');
-  console.log('');
-  console.log('===========================================');
-  console.log('TOKENIZING LINE ' + (i + 1) + ': |' + line + '|');
-
-  var r = grammar.tokenizeLine(line, ruleStack);
-
-  console.log('');
-
-  var stackElement = r.ruleStack;
-  var cnt = 0;
-  while (stackElement) {
-    cnt++;
-    stackElement = stackElement._parent;
-  }
-
-  console.log('@@LINE END RULE STACK CONTAINS ' + cnt + ' RULES:');
-  stackElement = r.ruleStack;
-  var list = [];
-  while (stackElement) {
-    if (!stackElement._instanceId) {
-      stackElement._instanceId = (++lastElementId);
+// Create a registry that can create a grammar from a scope name.
+const registry = new vsctm.Registry({
+  onigLib: Promise.resolve({
+      createOnigScanner: (sources) => new oniguruma.OnigScanner(sources),
+      createOnigString: (str) => new oniguruma.OnigString(str)
+  }),
+  loadGrammar: (scopeName) => {
+    if (scopeName === 'source.puppet') {
+      // https://github.com/textmate/javascript.tmbundle/blob/master/Syntaxes/JavaScript.plist
+      return readFile(GRAMMAR_PATH).then(data => vsctm.parseRawGrammar(data.toString()))
     }
-    var ruleDesc = grammar._ruleId2desc[stackElement._ruleId]
-    if (!ruleDesc) {
-      list.push('  * no rule description found for rule id: ' + stackElement._ruleId);
-    } else {
-      list.push('  * ' + ruleDesc.debugName + '  -- [' + ruleDesc.id + ',' + stackElement._instanceId + '] "' + stackElement._scopeName + '"');
-    }
-    stackElement = stackElement._parent;
+    console.log(`Unknown scope name: ${scopeName}`);
+    return null;
   }
-  list.reverse();
-  console.log(list.join('\n'));
+});
 
-  ruleStack = r.ruleStack;
-}
+// Load the JavaScript grammar and any other grammars included by it async.
+registry.loadGrammar('source.puppet').then(grammar => {
+  const fileContents = fs.readFileSync(FILE_PATH).toString();
+  const text = fileContents.split(/\r\n|\r|\n/);
+
+  let ruleStack = vsctm.INITIAL;
+  for (let i = 0; i < text.length; i++) {
+    const line = text[i];
+    console.log(`\nTokenizing line: ${line}`);
+    const lineTokens = grammar.tokenizeLine(line, ruleStack);
+    for (let j = 0; j < lineTokens.tokens.length; j++) {
+      const token = lineTokens.tokens[j];
+      console.log(` - token from ${token.startIndex} to ${token.endIndex} ` +
+        `(${line.substring(token.startIndex, token.endIndex)}) ` +
+        `with scopes ${token.scopes.join(', ')}`
+      );
+    }
+    ruleStack = lineTokens.ruleStack;
+  }
+});
